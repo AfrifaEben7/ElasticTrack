@@ -1,11 +1,11 @@
 # ElasticTrack
-
+<!--
 **Adaptive SAM2 Cell Tracking on Distributed Edge Hardware**
 
 > Paper: *Computers in Biology and Medicine* (under review)
 
 ElasticTrack builds a real-time cell tracker as three progressive architectural layers on SAM2, each addressing a distinct challenge in edge deployment.
-
+-->
 ---
 
 ## Three-Layer Architecture
