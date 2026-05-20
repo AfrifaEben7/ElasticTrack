@@ -152,6 +152,7 @@ RPi 5 ──(raw frame)──► Orin Nano ──(1.83 MB/frame)──► Jetson
 
 Payload: 22 MB (naive FPN) → **1.83 MB** (pos_enc[-1] only) — 12× reduction from SAM2's architecture.
 
+<!--
 ---
 
 ## Citation
@@ -165,7 +166,7 @@ Payload: 22 MB (naive FPN) → **1.83 MB** (pos_enc[-1] only) — 12× reduction
   year    = {2026}
 }
 ```
-
+-->
 ---
 
 ## License
