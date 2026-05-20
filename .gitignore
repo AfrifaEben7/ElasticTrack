@@ -1,0 +1,33 @@
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# Results / data
+benchmark_results/
+results/
+datasets/
+*.json
+*.tif
+*.tiff
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+nohup.out
+
+# OS
+.DS_Store

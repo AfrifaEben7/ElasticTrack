@@ -1,0 +1,45 @@
+# ElasticTrack default configuration
+# Override any value via environment variable (same name, uppercase)
+
+model:
+  sam2_root: /home/cps/Documents/biomed/ViT_part/segment-anything-2
+  sam2_cfg:  configs/sam2/sam21_hiera_t_512.yaml
+  sam2_ckpt: checkpoints/sam2.1_hiera_tiny.pt
+  ft_ckpt:   weights/sam2.1_tiny/sam2.1_ctc_v1_enc.pt
+  yolo_ckpt: weights/yolo/ctc_yolov8n3/weights/best.pt
+
+pipeline:
+  orin_ip:  192.168.0.230
+  nx_ip:    192.168.0.18
+  rasp_ip:  192.168.0.177
+  src_port: 5555
+  enc_port: 5556
+  out_port: 5557
+
+elastic:
+  disable:        false
+  pe_skip_thresh: 0.05
+  pe_eco_thresh:  0.40
+  pe_norm_thresh: 0.55
+  n_mem_skip:     0
+  n_mem_eco:      2
+  n_mem_norm:     4
+  n_mem_boost:    7
+
+tracker:
+  k_detect:            2       # YOLO re-detect every K frames
+  dense_grid:          13      # grid size for frame-0 detection
+  max_active_tracks:   60
+  match_centroid_dist: 100
+  min_spawn_dist:      80
+  mem_min_iou:         0.20
+  reprompt_iou_thresh: 0.30
+  yolo_reprompt_interval: 10
+
+streaming:
+  bidir_k: 0    # >0 enables sliding-window bidirectional (frames of lookahead)
+
+ltm:
+  enable:     false
+  size:       500
+  n_retrieve: 3
