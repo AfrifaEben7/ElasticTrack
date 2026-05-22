@@ -98,6 +98,10 @@ TCADAPT_INTERVAL     = int(os.environ.get("TCADAPT_INTERVAL", "5"))
 ENABLE_LTM       = os.environ.get("ENABLE_LTM",       "1") == "1"
 LTM_SIZE         = int(os.environ.get("LTM_SIZE",     "500"))  # max entries per track
 LTM_N_RETRIEVE   = int(os.environ.get("LTM_N_RETRIEVE", "3"))  # entries to inject per frame
+# Spatial-constrained retrieval: when >0, LTM candidates are filtered by distance before ranking, and only
+# stored centroid is within this pixel radius of the current track centroid.
+# 0 disables the filter (vanilla cosine-only LTM, the prior behaviour).
+LTM_SPATIAL_RADIUS = float(os.environ.get("LTM_SPATIAL_RADIUS", "0"))
 
 # ── Hyper-parameters (same as AMG for fair comparison) ───────────────────────
 K_DETECT            = 2
@@ -245,26 +249,57 @@ class LongTermMemoryCache:
     starts drifting — giving SAM2 the "what did this cell look like before"
     context that a FIFO bank permanently loses after 7 frames.
     """
-    def __init__(self, max_size=500, n_retrieve=3):
-        self._pool: list = []
-        self.max_size  = max_size
-        self.n_retrieve = n_retrieve
+    def __init__(self, max_size=500, n_retrieve=3, spatial_radius=0.0):
+        self._pool: list = []           # list of {feat, pos, centroid}
+        self.max_size       = max_size
+        self.n_retrieve     = n_retrieve
+        self.spatial_radius = spatial_radius  # 0 = filter disabled
+        # Counters for diagnostics — surfaced via stats()
+        self.n_add        = 0
+        self.n_retrieved  = 0
+        self.n_filtered   = 0  # candidates rejected by spatial filter
 
-    def add(self, entry):
-        self._pool.append(entry)
+    def add(self, entry, centroid=None):
+        # Shallow copy with centroid attached (does not mutate entry).
+        rec = {"feat": entry["feat"], "pos": entry["pos"], "centroid": centroid}
+        self._pool.append(rec)
+        self.n_add += 1
         if len(self._pool) > self.max_size:
             self._pool.pop(0)
 
-    def retrieve(self, short_term_entries):
+    def retrieve(self, short_term_entries, current_centroid=None):
         """Return up to n_retrieve entries from LTM not in the short-term bank.
 
-        Query = mean of short-term feat vectors.
-        Returns empty list if LTM has nothing beyond what short-term already holds.
+        Ranking: cosine similarity of mean short-term query vs. candidate feat.
+        Optional spatial filter: when `spatial_radius > 0` AND both stored and
+        current centroids are available, drop candidates whose centroid is
+        further than `spatial_radius` pixels from `current_centroid`.
         """
         n_st = len(short_term_entries)
         # Only look at frames older than the short-term window
         candidates = self._pool[:-n_st] if n_st < len(self._pool) else []
         if not candidates or not short_term_entries:
+            return []
+
+        # Spatial filter (no-op if disabled or missing centroid).
+        if self.spatial_radius > 0.0 and current_centroid is not None:
+            ccx, ccy = current_centroid
+            r2 = self.spatial_radius * self.spatial_radius
+            filtered = []
+            for c in candidates:
+                pc = c.get("centroid")
+                if pc is None:
+                    # No centroid stored → keep (legacy / spawn-time entries).
+                    filtered.append(c)
+                    continue
+                dx, dy = pc[0] - ccx, pc[1] - ccy
+                if dx * dx + dy * dy <= r2:
+                    filtered.append(c)
+                else:
+                    self.n_filtered += 1
+            candidates = filtered
+
+        if not candidates:
             return []
 
         q_feats = torch.stack(
@@ -277,7 +312,16 @@ class LongTermMemoryCache:
         sims = (c_feats @ q.T).squeeze(1)
         k    = min(self.n_retrieve, len(candidates))
         idxs = sims.topk(k).indices.tolist()
-        return [candidates[i] for i in idxs]
+        out = [candidates[i] for i in idxs]
+        self.n_retrieved += len(out)
+        return out
+
+    def stats(self):
+        return {"n_add": self.n_add,
+                "n_retrieved": self.n_retrieved,
+                "n_filtered_spatial": self.n_filtered,
+                "spatial_radius_px": self.spatial_radius,
+                "pool_size": len(self._pool)}
 
 
 # ── Option 1: Optical Flow Prompt Propagation ─────────────────────────────────
@@ -601,9 +645,14 @@ def spawn_track(model, fpn, curr_pos, det, track_id, n_mem, fi, device):
     track = CellTrack(track_id=track_id, memory_bank=mem_bank,
                       prev_logits=mask_lr.detach(), last_mask=mask_np,
                       last_iou=float(iou_p.squeeze()[best_idx]), fi=fi)
-    track.ltm = LongTermMemoryCache(max_size=LTM_SIZE, n_retrieve=LTM_N_RETRIEVE)
+    track.ltm = LongTermMemoryCache(max_size=LTM_SIZE, n_retrieve=LTM_N_RETRIEVE,
+                                    spatial_radius=LTM_SPATIAL_RADIUS)
     if ENABLE_LTM:
-        track.ltm.add(entry)
+        # Spawn-time centroid = mask centroid from the just-computed mask.
+        ys_s, xs_s = np.where(mask_np)
+        spawn_centroid = ((float(xs_s.mean()), float(ys_s.mean()))
+                          if xs_s.size else None)
+        track.ltm.add(entry, centroid=spawn_centroid)
     return track
 
 
@@ -652,7 +701,11 @@ def reprompt_track(model, track, fpn, det, n_mem, fi, device):
     entry = {"feat": mem_out["vision_features"], "pos": mem_out["vision_pos_enc"][0]}
     track.memory_bank.append(entry)
     if ENABLE_LTM:
-        track.ltm.add(entry)
+        # Use the fresh mask centroid (matches spawn-time convention).
+        ys_r, xs_r = np.where(mask_np)
+        reprompt_centroid = ((float(xs_r.mean()), float(ys_r.mean()))
+                             if xs_r.size else None)
+        track.ltm.add(entry, centroid=reprompt_centroid)
 
     track.prev_logits  = mask_lr.detach()
     track.last_mask    = mask_np
@@ -682,8 +735,10 @@ def update_track(model, track, fpn, curr_pos, n_mem, fi, device):
         attended = curr_feat
     else:
         short_entries = list(track.memory_bank)
-        # Retrieve relevant distant-past frames from LTM and append
-        ltm_entries = (track.ltm.retrieve(short_entries)
+        # Retrieve relevant distant-past frames from LTM, optionally constrained
+        # by spatial proximity to the current track centroid.
+        ltm_entries = (track.ltm.retrieve(short_entries,
+                                          current_centroid=track.last_valid_centroid)
                        if ENABLE_LTM and hasattr(track, "ltm") else [])
         all_entries = short_entries + ltm_entries
 
@@ -738,7 +793,13 @@ def update_track(model, track, fpn, curr_pos, n_mem, fi, device):
         entry = {"feat": mem_out["vision_features"], "pos": mem_out["vision_pos_enc"][0]}
         track.memory_bank.append(entry)
         if ENABLE_LTM and hasattr(track, "ltm"):
-            track.ltm.add(entry)
+            # Centroid of the just-decoded mask (consistent with retrieve query).
+            if mask_np.sum() > 0:
+                ys_u, xs_u = np.where(mask_np)
+                store_centroid = (float(xs_u.mean()), float(ys_u.mean()))
+            else:
+                store_centroid = None
+            track.ltm.add(entry, centroid=store_centroid)
 
     track.prev_logits  = mask_lr.detach()
     track.last_mask    = mask_np
